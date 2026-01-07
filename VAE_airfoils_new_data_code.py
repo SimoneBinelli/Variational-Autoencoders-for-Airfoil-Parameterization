@@ -873,8 +873,8 @@ def run_full_pipeline(airfoil_xy, name="Airfoil", n_ctrl=11):
 # Generate 2 new airfoils
 
 # 2 latent vectors with values different from the z_i means
-w1 = np.array([-2.2, -1.6, -3.1, 0.1, 0.2, -0.5, 0.25, -2.2]) 
-w2 = np.array([-2.3, -1.7, -3.3, 0.2, 0.4, -1.0, 0.27, -1.7])
+w1 = np.array([0.5, 1.6, -0.5, 0.2, 0.6, -0.5, -3.9, 1.0]) 
+w2 = np.array([0.35, 1.7, 0.1, 0.22, 0.2, 0.22, -4.0, 1.5])
 
 Z1 = torch.tensor(w1, dtype=torch.float32).unsqueeze(0) 
 Z2 = torch.tensor(w2, dtype=torch.float32).unsqueeze(0)
@@ -891,58 +891,67 @@ airfoil2 = np.column_stack((x_norm, y2)) # coordinates of the second generated a
 
 # Raw plot + radar plot
 
-# Latent variables means
 z_mean = np.mean(Z, axis=0)
+z_std  = np.std(Z, axis=0, ddof=0)
 
-# Amplify the vectors by a common factor
-stretch = 1.6
-v1 = w1 * stretch
-v2 = w2 * stretch
+# Convert latent vectors to sigma-units
+def to_sigma_units(z, z_mean, z_std):
+    
+    return (z - z_mean) / z_std
 
-# Global r_max -> both plots use the same radial scale
-global_rmax = max(np.max(np.abs(v1)), np.max(np.abs(v2))) * 1.1 # 10% margin
-r_ticks = np.linspace(-global_rmax, global_rmax, 5)
+w1_sigma = to_sigma_units(w1, z_mean, z_std)
+w2_sigma = to_sigma_units(w2, z_mean, z_std)
+mean_sigma = np.zeros_like(z_mean)
 
-# Prepare the radar values
-def radar_vals(w):
-    vals = (w * stretch).tolist()
-    return vals + [vals[0]] # adds the first value to close the polygon
+# Radar utilities
+def radar_vals_sigma(z_sigma):
+    
+    vals = z_sigma.tolist()
+    
+    return vals + [vals[0]]
 
-n_dim = len(w1)
-labels = [f"z{i}" for i in range(n_dim)]
-angles = np.linspace(0, 2*np.pi, n_dim, endpoint=False).tolist() # takes n_dim equidistant angles between 0 and 2pi (2pi excluded)
-angles += angles[:1] # adds the first angle at the end -> this also closes the polygon
+airfoil1_vals = radar_vals_sigma(w1_sigma)
+airfoil2_vals = radar_vals_sigma(w2_sigma)
+mean_vals     = radar_vals_sigma(mean_sigma)
 
-mean_vals = z_mean.tolist() + [z_mean[0]] # adds the first element at the end -> same trick as before
-airfoil1_vals = radar_vals(w1) # distances from the center for each angle of the radar (first airfoil)
-airfoil2_vals = radar_vals(w2) # distances from the center for each angle of the radar (second airfoil)
+latent_dim = len(w1)
+labels = [f"$z_{i}$" for i in range(latent_dim)]
+
+angles = np.linspace(0, 2*np.pi, latent_dim, endpoint=False).tolist()
+angles += angles[:1]
+
+# Sigma-based radial scale
+sigma_max = int(np.ceil(max(np.max(np.abs(w1_sigma)), np.max(np.abs(w2_sigma)))))
+r_ticks = np.arange(-sigma_max, sigma_max + 1, 1)
 
 # Generated airfoil 1
 fig = plt.figure(figsize=(11, 4))
 ax1 = fig.add_axes([0.05, 0.15, 0.42, 0.75])
 ax1.plot(airfoil1[:, 0], airfoil1[:, 1], 'r-', lw=1.8)
 ax1.set_title("Generated Airfoil #1 (Raw)")
-ax1.set_xlabel("x (chordwise)")
-ax1.set_ylabel("y")
+ax1.set_xlabel("x / c")
+ax1.set_ylabel("y / c")
 ax1.axis("equal")
 ax1.grid(True)
 
-# Radar plot 1
+# Radar plot (σ-units) 1
 ax2 = fig.add_axes([0.5, 0.12, 0.35, 0.76], polar=True)
-ax2.plot(angles, mean_vals, color='black', linestyle='--', linewidth=1.8, label='Mean')
-ax2.fill(angles, mean_vals, color='black', alpha=0.18)
-ax2.plot(angles, airfoil1_vals, color='red', linewidth=1.8, label='Airfoil #1')
+ax2.yaxis.grid(True, color='black', linewidth=0.9)   
+ax2.xaxis.grid(True)                                  
+ax2.spines['polar'].set_color('black')                
+ax2.spines['polar'].set_linewidth(1.1)
+ax2.plot(angles, mean_vals, 'k--', lw=1.8, label="Mean (0σ)")
+ax2.fill(angles, mean_vals, color='black', alpha=0.15)
+ax2.plot(angles, airfoil1_vals, color='red', lw=1.8, label="Airfoil #1")
 ax2.fill(angles, airfoil1_vals, color='red', alpha=0.35)
 ax2.set_xticks(angles[:-1])
 ax2.set_xticklabels(labels, fontsize=10)
 ax2.set_yticks(r_ticks)
-ax2.set_yticklabels([f"{t:.2f}" for t in r_ticks], fontsize=9)
-ax2.set_ylim(-global_rmax, global_rmax)
+ax2.set_yticklabels([f"{t}σ" for t in r_ticks], fontsize=9)
+ax2.set_ylim(-sigma_max, sigma_max)
 ax2.set_rlabel_position(90)
-ax2.set_title("Generated Airfoil #1 — Latent vs Mean", size=13, y=1.12)
-ax2.grid(True, alpha=0.35)
-ax2.legend(loc='upper right', bbox_to_anchor=(1.27, 1.1))
-
+ax2.set_title("Generated Airfoil #1 — Latent Deviation (σ-units)", y=1.12)
+ax2.legend(loc='upper right', bbox_to_anchor=(1.32, 1.1))
 plt.show()
 
 # Generated airfoil 2
@@ -950,27 +959,29 @@ fig = plt.figure(figsize=(11, 4))
 ax1 = fig.add_axes([0.05, 0.15, 0.42, 0.75])
 ax1.plot(airfoil2[:, 0], airfoil2[:, 1], 'r-', lw=1.8)
 ax1.set_title("Generated Airfoil #2 (Raw)")
-ax1.set_xlabel("x (chordwise)")
-ax1.set_ylabel("y")
+ax1.set_xlabel("x / c")
+ax1.set_ylabel("y / c")
 ax1.axis("equal")
 ax1.grid(True)
 
-# Radar plot 2
+# Radar plot (σ-units) 2
 ax2 = fig.add_axes([0.5, 0.12, 0.35, 0.76], polar=True)
-ax2.plot(angles, mean_vals, color='black', linestyle='--', linewidth=1.8, label='Mean')
-ax2.fill(angles, mean_vals, color='black', alpha=0.18)
-ax2.plot(angles, airfoil2_vals, color='red', linewidth=1.8, label='Airfoil #2')
+ax2.yaxis.grid(True, color='black', linewidth=0.9)
+ax2.xaxis.grid(True)
+ax2.spines['polar'].set_color('black')
+ax2.spines['polar'].set_linewidth(1.1)
+ax2.plot(angles, mean_vals, 'k--', lw=1.8, label="Mean (0σ)")
+ax2.fill(angles, mean_vals, color='black', alpha=0.15)
+ax2.plot(angles, airfoil2_vals, color='red', lw=1.8, label="Airfoil #2")
 ax2.fill(angles, airfoil2_vals, color='red', alpha=0.35)
 ax2.set_xticks(angles[:-1])
 ax2.set_xticklabels(labels, fontsize=10)
 ax2.set_yticks(r_ticks)
-ax2.set_yticklabels([f"{t:.2f}" for t in r_ticks], fontsize=9)
-ax2.set_ylim(-global_rmax, global_rmax)
+ax2.set_yticklabels([f"{t}σ" for t in r_ticks], fontsize=9)
+ax2.set_ylim(-sigma_max, sigma_max)
 ax2.set_rlabel_position(90)
-ax2.set_title("Generated Airfoil #2 — Latent vs Mean", size=13, y=1.12)
-ax2.grid(True, alpha=0.35)
-ax2.legend(loc='upper right', bbox_to_anchor=(1.27, 1.1))
-
+ax2.set_title("Generated Airfoil #2 — Latent Deviation (σ-units)", y=1.12)
+ax2.legend(loc='upper right', bbox_to_anchor=(1.32, 1.1))
 plt.show()
 
 # B-spline on the two generated airfoils
@@ -1001,9 +1012,9 @@ z_mean = np.mean(Z, axis=0)
 z_std = np.std(Z, axis=0)
 
 # Plot
-fig, axes = plt.subplots(4, 2, figsize=(12, 12)) # 8 subplots
+fig, axes = plt.subplots(2, 4, figsize=(14, 7)) # 8 subplots
 axes = axes.flatten()
-fig.suptitle("Effect of Each Latent Variable on Airfoil Geometry (μ ± 2σ)", fontsize=15, y=0.93)
+fig.suptitle("Effect of Each Latent Variable on Airfoil Geometry (μ ± 2σ)", fontsize=15, y=0.98)
 
 for i in range(latent_dim):
     
@@ -1048,7 +1059,7 @@ for i in range(latent_dim):
     ax.grid(True)
     ax.legend(fontsize=9, loc='upper right')
 
-plt.tight_layout(rect=[0, 0, 1, 0.93])
+fig.subplots_adjust(hspace=0.35)
 plt.show()
 
 # Q–Q Plots
@@ -1575,6 +1586,8 @@ print(df.columns)
 # OF_Icsi_OP_01	-> integrated loss coefficient
 # OF_Ieta_OP_01	-> integrated efficiency index
 
+# DOFs
+
 # Select only the DOFs
 dof_cols = [c for c in df.columns if c.startswith("DOF_")]
 print(f"Number of DOFs: {len(dof_cols)}")
@@ -1613,21 +1626,60 @@ print(f"Selected DOF: {len(dof_cols_f)} -> {dof_cols_f}")
 n_dof = DOF_final.shape[1]
 n_lat = Z_mu_all.shape[1]
 
-pearson = np.zeros((n_dof, n_lat))
-spearman = np.zeros((n_dof, n_lat))
-kendall = np.zeros((n_dof, n_lat))
-mi = np.zeros((n_dof, n_lat))
+pearson_dof = np.zeros((n_dof, n_lat))
+spearman_dof = np.zeros((n_dof, n_lat))
+kendall_dof = np.zeros((n_dof, n_lat))
+mi_dof = np.zeros((n_dof, n_lat))
 
 for i in range(n_dof):
     for j in range(n_lat):
-        pearson[i, j], _ = stats.pearsonr(DOF_final[:, i], Z_mu_all[:, j])
-        spearman[i, j], _ = stats.spearmanr(DOF_final[:, i], Z_mu_all[:, j])
-        kendall[i, j], _ = stats.kendalltau(DOF_final[:, i], Z_mu_all[:, j])
-        mi[i, j] = mutual_info_regression(DOF_final[:, [i]], Z_mu_all[:, j], random_state=20)[0]
+        pearson_dof[i, j], _ = stats.pearsonr(DOF_final[:, i], Z_mu_all[:, j])
+        spearman_dof[i, j], _ = stats.spearmanr(DOF_final[:, i], Z_mu_all[:, j])
+        kendall_dof[i, j], _ = stats.kendalltau(DOF_final[:, i], Z_mu_all[:, j])
+        mi_dof[i, j] = mutual_info_regression(DOF_final[:, [i]], Z_mu_all[:, j], random_state=20)[0]
 
 # Correlation matrices
-plot_pearson_correlation_matrix(pearson, "Pearson Correlation (DOF - Latent Variables)", dof_cols_f, latent_labels)
-plot_spearman_correlation_matrix(spearman, "Spearman Correlation (DOF - Latent Variables)", dof_cols_f, latent_labels)
-plot_kendall_correlation_matrix(kendall, "Kendall-Tau Correlation (DOF - Latent Variables)", dof_cols_f, latent_labels)
-plot_mutual_information_matrix(mi, "Mutual Information (DOF - Latent Variables)", dof_cols_f, latent_labels)
+plot_pearson_correlation_matrix(pearson_dof, "Pearson Correlation (DOF - Latent Variables)", dof_cols_f, latent_labels)
+plot_spearman_correlation_matrix(spearman_dof, "Spearman Correlation (DOF - Latent Variables)", dof_cols_f, latent_labels)
+plot_kendall_correlation_matrix(kendall_dof, "Kendall-Tau Correlation (DOF - Latent Variables)", dof_cols_f, latent_labels)
+plot_mutual_information_matrix(mi_dof, "Mutual Information (DOF - Latent Variables)", dof_cols_f, latent_labels)
+
+# OFs
+
+# Select only the OFs
+of_cols = [c for c in df.columns if c.startswith("OF_")]
+print(f"Number of OFs: {len(of_cols)}")
+print(of_cols)
+
+OF = df[of_cols].values   
+print(OF.shape) # (922, 29)
+
+# Keep only OFs with standard deviation > 0
+keep_of = np.std(OF, axis=0) > tol 
+
+OF_final = OF[:, keep_of] 
+of_cols_f = [c for c, k in zip(of_cols, keep_of) if k]
+
+print(f"Selected OF: {len(of_cols_f)} -> {of_cols_f}")
+
+# Compute correlations
+n_of = OF_final.shape[1]
+
+pearson_of = np.zeros((n_of, n_lat))
+spearman_of = np.zeros((n_of, n_lat))
+kendall_of = np.zeros((n_of, n_lat))
+mi_of = np.zeros((n_of, n_lat))
+
+for i in range(n_of):
+    for j in range(n_lat):
+        pearson_of[i, j], _ = stats.pearsonr(OF_final[:, i], Z_mu_all[:, j])
+        spearman_of[i, j], _ = stats.spearmanr(OF_final[:, i], Z_mu_all[:, j])
+        kendall_of[i, j], _ = stats.kendalltau(OF_final[:, i], Z_mu_all[:, j])
+        mi_of[i, j] = mutual_info_regression(OF_final[:, [i]], Z_mu_all[:, j], random_state=20)[0]
+
+# Correlation matrices
+plot_pearson_correlation_matrix(pearson_of, "Pearson Correlation (OF - Latent Variables)", of_cols_f, latent_labels)
+plot_spearman_correlation_matrix(spearman_of, "Spearman Correlation (OF - Latent Variables)", of_cols_f, latent_labels)
+plot_kendall_correlation_matrix(kendall_of, "Kendall-Tau Correlation (OF - Latent Variables)", of_cols_f, latent_labels)
+plot_mutual_information_matrix(mi_of, "Mutual Information (OF - Latent Variables)", of_cols_f, latent_labels)
 
