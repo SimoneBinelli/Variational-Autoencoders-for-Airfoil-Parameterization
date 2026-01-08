@@ -279,7 +279,7 @@ explained_var_ratio = (S**2) / torch.sum(S**2) # part of the variance explained 
 x_pca = np.arange(1, 11) # 10 principal components
 y_pca = explained_var_ratio[:10] # first 10 elements of the vector explained_var_ratio
 
-# Plot
+# Plot 
 
 plt.plot(x_pca, y_pca, marker='o')
 plt.xlabel("Principal Component")
@@ -288,6 +288,17 @@ plt.xlim(0.8, 10.2)
 plt.ylim(min(y_pca) - 0.01, max(y_pca) + 0.02) 
 plt.xticks(np.arange(1, 11, 1))
 plt.grid(True)
+plt.show()
+
+# Plot (log scale)
+
+plt.plot(x_pca, y_pca, marker='o')
+plt.xlabel("Principal Component")
+plt.ylabel("Variance Ratio (log scale)")
+plt.xlim(0.8, 10.2)
+plt.xticks(np.arange(1, 11, 1))
+plt.yscale("log")
+plt.grid(True, which="both", linestyle="--")
 plt.show()
 
 # Hyperparameters (same as in the paper)
@@ -1682,4 +1693,3 @@ plot_pearson_correlation_matrix(pearson_of, "Pearson Correlation (OF - Latent Va
 plot_spearman_correlation_matrix(spearman_of, "Spearman Correlation (OF - Latent Variables)", of_cols_f, latent_labels)
 plot_kendall_correlation_matrix(kendall_of, "Kendall-Tau Correlation (OF - Latent Variables)", of_cols_f, latent_labels)
 plot_mutual_information_matrix(mi_of, "Mutual Information (OF - Latent Variables)", of_cols_f, latent_labels)
-
