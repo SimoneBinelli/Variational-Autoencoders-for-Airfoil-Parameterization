@@ -134,7 +134,7 @@ def cosine_resample(x, y, n):
     
     return x_new, f(x_new) # new cosine-spaced x values, new linearly interpolated y values
 
-def preprocess_airfoil(x, y, n_up, n_low, scale=True):
+def preprocess_airfoil(x, y, n_up, n_low):
 
     # Find LE and TE
     idx_LE = np.argmin(x)
@@ -167,13 +167,7 @@ def preprocess_airfoil(x, y, n_up, n_low, scale=True):
     x_norm = (x_full - x_full.min()) / chord
     y_norm = y_full / chord
 
-    # Min-Max scaling
-    if scale:
-        ymin, ymax = y_norm.min(), y_norm.max()
-        y_scaled = (y_norm - ymin) / (ymax - ymin)
-        return x_norm, y_norm, y_scaled, ymin, ymax
-    else:
-        return x_norm, y_norm, None, None, None
+    return x_norm, y_norm
 
 # Pre-processing application
 
@@ -187,15 +181,11 @@ for folder in data:
         y = data[folder][file]["y"]
 
         try:
-            xr, yr, yr_scaled, y_min, y_max = preprocess_airfoil(x, y, n_up=100, n_low=99, scale=True)
+            xr, yr = preprocess_airfoil(x, y, n_up=100, n_low=99)
 
             data[folder][file]["x_norm"] = xr
             data[folder][file]["y_norm"] = yr
             
-            data[folder][file]["y_scaled"] = yr_scaled
-            data[folder][file]["y_min"] = y_min
-            data[folder][file]["y_max"] = y_max
-
             count_processed += 1
 
         except Exception as e:
@@ -203,7 +193,7 @@ for folder in data:
             count_failed += 1
 
 print(f"Airfoils successfully preprocessed: {count_processed}")
-print(f"Airfoils failed preprocessing:      {count_failed}")
+print(f"Airfoils failed preprocessing: {count_failed}")
 
 # Pre-processed airfoils plot
 
@@ -219,7 +209,7 @@ def plot_processed_airfoils(airfoil_data, delay=0.1):
                 continue
 
             x = item["x_norm"]
-            y = item["y_scaled"]
+            y = item["y_norm"]
 
             plt.figure(figsize=(6,3))
             plt.scatter(x, y, alpha=0.3, s=10)
@@ -233,51 +223,77 @@ def plot_processed_airfoils(airfoil_data, delay=0.1):
 
 plot_processed_airfoils(data)
 
-# Dataset preparation
+# Column-wise min-max scaling
 
 import torch, torch.nn as nn, torch.optim as optim
 from torch.utils.data import random_split, DataLoader, TensorDataset
 
-X = []
+keys = [] # stores folder and file of each airfoil
+Ynorm_list = [] # stores y_norm values of each airfoil
 
 for folder in data:
     for file in data[folder]:
-        if "y_scaled" in data[folder][file]:
-            X.append(data[folder][file]["y_scaled"])
+        if "y_norm" in data[folder][file]:
+            
+            keys.append((folder, file))
+            Ynorm_list.append(data[folder][file]["y_norm"])
 
-X = np.array(X)
-print(X.shape) # (number of airfoils, 199)
+Ynorm = np.array(Ynorm_list) # (922, 199) matrix
 
-X = torch.tensor(X, dtype = torch.float32) # trasform into a tensor for torch
-dataset = TensorDataset(X) # tensor dataset for data loader
+n_samples = len(keys)
+n_train = int(0.75 * n_samples)
+n_val = int(0.15 * n_samples)
+n_test = n_samples - n_train - n_val
 
-# Training/Validation/Test split
+g = torch.Generator().manual_seed(20)
+train_idx, val_idx, test_idx = random_split(range(n_samples), [n_train, n_val, n_test], generator=g)
 
-n_samples = len(dataset) 
-n_train = int(0.75 * n_samples)      # 75% of the data as training set
-n_val = int(0.15 * n_samples)        # 15% of the data as validation set
-n_test = n_samples - n_train - n_val # 10% of the data as test set
+train_idx = np.array(list(train_idx))
+val_idx   = np.array(list(val_idx))
+test_idx  = np.array(list(test_idx))
 
-g = torch.Generator().manual_seed(20) 
-train_set, val_set, test_set = random_split(dataset, [n_train, n_val, n_test], generator=g)
+# Scaling only on the training set
+Ytrain = Ynorm[train_idx] # (n_train, 199)
+col_min = Ytrain.min(axis=0) # (199,)
+col_max = Ytrain.max(axis=0) # (199,)
+den = col_max - col_min
+den[den == 0] = 1.0
 
-train_loader = DataLoader(train_set, batch_size = 64, shuffle = True) # to read the data as mini-batches of size 64
-val_loader = DataLoader(val_set, batch_size = 64)
-test_loader = DataLoader(test_set, batch_size = 64)
+Yscaled = (Ynorm - col_min) / den # (922, 199)
+
+for i, (folder, file) in enumerate(keys):
+    
+    data[folder][file]["y_scaled"] = Yscaled[i]
+    data[folder][file]["y_min"] = col_min    
+    data[folder][file]["y_max"] = col_max
+
+# Dataset preparation
+
+X = torch.tensor(Yscaled, dtype=torch.float32)
+dataset = TensorDataset(X)
+
+train_set = torch.utils.data.Subset(dataset, train_idx.tolist())
+val_set = torch.utils.data.Subset(dataset, val_idx.tolist())
+test_set = torch.utils.data.Subset(dataset, test_idx.tolist())
+
+train_loader = DataLoader(train_set, batch_size=64, shuffle=True)
+val_loader = DataLoader(val_set, batch_size=64, shuffle=False)
+test_loader = DataLoader(test_set, batch_size=64, shuffle=False)
 
 # PCA
 
-X.shape # [922, 199]
-X_centered = X - X.mean(dim=0, keepdim=True) # every column must have mean = 0
-U, S, Vt = torch.linalg.svd(X_centered, full_matrices=False)  # SVD; if data are centered the PCA and the SVD are equivalent
+X.shape # (922, 199)
+X_train = torch.stack([train_set[i][0] for i in range(len(train_set))], dim=0)
+X_centered = X_train - X_train.mean(dim=0, keepdim=True) # every column must have mean = 0
+U, S, Vt = torch.linalg.svd(X_centered, full_matrices=False) # SVD; if data are centered the PCA and the SVD are equivalent
 # Vt principal directions
 # S singular values
 
-X_pca = X_centered @ Vt.T # data coordinates in the new principal component space
+X_train_pca = X_centered @ Vt.T # data coordinates in the new principal component space
 explained_var_ratio = (S**2) / torch.sum(S**2) # part of the variance explained by each component
 
 x_pca = np.arange(1, 11) # 10 principal components
-y_pca = explained_var_ratio[:10] # first 10 elements of the vector explained_var_ratio
+y_pca = explained_var_ratio[:10].numpy() # first 10 elements of the vector explained_var_ratio
 
 # Plot 
 
@@ -382,9 +398,9 @@ dec.apply(weights_init)
 
 # Check before the training phase
 
-print(torch.isnan(X).any())       # False
-print(torch.isinf(X).any())       # False
-print(torch.min(X), torch.max(X)) # [0,1]
+print(torch.isnan(X).any())       
+print(torch.isinf(X).any())      
+print(torch.min(X), torch.max(X)) 
 print(torch.mean(X))              
 
 # Training and Validation phase
@@ -521,18 +537,27 @@ def inverse_scale(y_scaled, y_min, y_max):
     return y_scaled * (y_max - y_min) + y_min
 
 folder = list(data.keys())[0]
-file   = list(data[folder].keys())[0] # first airfoil
+file = list(data[folder].keys())[0] # first airfoil
 
-x_norm   = data[folder][file]["x_norm"]
-y_scaled  = data[folder][file]["y_scaled"]
-y_min     = data[folder][file]["y_min"]
-y_max     = data[folder][file]["y_max"]
+x_norm = data[folder][file]["x_norm"]
+y_scaled = data[folder][file]["y_scaled"]
+y_min = data[folder][file]["y_min"]
+y_max = data[folder][file]["y_max"]
 
-x_tensor = torch.tensor(y_scaled).float().unsqueeze(0)
-mu, logvar = enc(x_tensor)
-z = mu
+enc.eval()
+dec.eval()
 
-y_recon_scaled = dec(z).detach().squeeze().numpy()
+with torch.no_grad():
+    
+    x_tensor = torch.tensor(y_scaled).float().unsqueeze(0)
+    mu, logvar = enc(x_tensor)
+    sigma = torch.exp(0.5 * logvar)
+
+    eps_z = torch.randn_like(mu)       
+    z = mu + sigma * eps_z             
+
+    y_recon_scaled = dec(z).squeeze().cpu().numpy()
+
 y_recon_original = inverse_scale(y_recon_scaled, y_min, y_max)
 y_original = inverse_scale(y_scaled, y_min, y_max)
 
@@ -550,11 +575,19 @@ plt.show()
 # Now on the whole dataset
 def get_reconstruction(y_scaled):
     
-    x_tensor = torch.tensor(y_scaled).float().unsqueeze(0)
-    mu, logvar = enc(x_tensor)
-    z = mu
+    enc.eval()
+    dec.eval()
     
-    return dec(z).detach().squeeze().numpy()
+    with torch.no_grad():
+        
+        x_tensor = torch.tensor(y_scaled).float().unsqueeze(0)
+        mu, logvar = enc(x_tensor)
+        sigma = torch.exp(0.5 * logvar)
+
+        eps_z = torch.randn_like(mu)
+        z = mu + sigma * eps_z
+
+        return dec(z).squeeze().cpu().numpy()
 
 loss_list = []
 
@@ -580,7 +613,7 @@ for folder in data:
 
 loss_list.sort(key=lambda x: x[0])
 
-best12  = loss_list[:12]         
+best12 = loss_list[:12]         
 worst12 = loss_list[-12:]        
 
 # Plot worst 12 (highest reconstruction loss)
@@ -637,15 +670,16 @@ with torch.no_grad():
     
     for (x_batch,) in train_loader:
         
-        x_batch = x_batch.float()
-    
-        mu, _ = enc(x_batch) 
-        z = mu 
+        mu, logvar = enc(x_batch.float())
+        sigma = torch.exp(0.5 * logvar)
         
-        Z.append(z.numpy()) # z from tensor to array
+        eps = torch.randn_like(mu)
+        z = mu + sigma * eps
+        
+        Z.append(z.detach().cpu().numpy()) # z from tensor to array
 
 # all batches are merged into a single matrix
-Z = np.concatenate(Z, axis=0) # [n_samples in the training set, latent_dim]
+Z = np.concatenate(Z, axis=0) # (n_samples in the training set, latent_dim)
 latent_dim = Z.shape[1]
 
 # Plot
@@ -884,46 +918,50 @@ def run_full_pipeline(airfoil_xy, name="Airfoil", n_ctrl=11):
 # Generate 2 new airfoils
 
 # 2 latent vectors with values different from the z_i means
-w1 = np.array([0.5, 1.6, -0.5, 0.2, 0.6, -0.5, -3.9, 1.0]) 
-w2 = np.array([0.35, 1.7, 0.1, 0.22, 0.2, 0.22, -4.0, 1.5])
+w1 = np.array([-1.0, -2.0, 1.5, -1.7, 1.5, -1.0, 2.5, 4.5]) 
+w2 = np.array([0.2, -4.5, -0.2, -0.8, 3.5, -2.0, 0.5, 2.0])
 
 Z1 = torch.tensor(w1, dtype=torch.float32).unsqueeze(0) 
 Z2 = torch.tensor(w2, dtype=torch.float32).unsqueeze(0)
-# .unsqueeze(0) adds a batch size (transforms them from [8] -> [1, 8])
-# dec expects inputs of the form [batch_size, latent_dim]
+# .unsqueeze(0) adds a batch size (transforms them from (8) -> (1, 8))
+# dec expects inputs of the form (batch_size, latent_dim)
+
+# Inverse scaling
+def inverse_scale(y_scaled, col_min, col_max):
+    
+    return y_scaled * (col_max - col_min) + col_min
 
 with torch.no_grad():
     
-    y1 = dec(Z1).squeeze().numpy() # 199 y ordinates of the generated airfoil
-    y2 = dec(Z2).squeeze().numpy() # squeeze() eliminates the batch size
-    
-airfoil1 = np.column_stack((x_norm, y1)) # coordinates of the first generated airfoil
-airfoil2 = np.column_stack((x_norm, y2)) # coordinates of the second generated airfoil
+    y1_scaled = dec(Z1).squeeze().numpy()
+    y2_scaled = dec(Z2).squeeze().numpy()
 
-# Raw plot + radar plot
+y1_norm = inverse_scale(y1_scaled, col_min, col_max)
+y2_norm = inverse_scale(y2_scaled, col_min, col_max)
+
+# Airfoil assembly
+airfoil1 = np.column_stack((x_norm, y1_norm))
+airfoil2 = np.column_stack((x_norm, y2_norm))
+
+# Raw plot + radar plot 
 
 z_mean = np.mean(Z, axis=0)
-z_std  = np.std(Z, axis=0, ddof=0)
 
-# Convert latent vectors to sigma-units
-def to_sigma_units(z, z_mean, z_std):
-    
-    return (z - z_mean) / z_std
-
-w1_sigma = to_sigma_units(w1, z_mean, z_std)
-w2_sigma = to_sigma_units(w2, z_mean, z_std)
-mean_sigma = np.zeros_like(z_mean)
+# Use latent vectors in original scale
+w1_raw = w1.copy()
+w2_raw = w2.copy()
+mean_raw = z_mean.copy()
 
 # Radar utilities
-def radar_vals_sigma(z_sigma):
+def radar_vals_raw(z_raw):
     
-    vals = z_sigma.tolist()
+    vals = z_raw.tolist()
     
     return vals + [vals[0]]
 
-airfoil1_vals = radar_vals_sigma(w1_sigma)
-airfoil2_vals = radar_vals_sigma(w2_sigma)
-mean_vals     = radar_vals_sigma(mean_sigma)
+airfoil1_vals = radar_vals_raw(w1_raw)
+airfoil2_vals = radar_vals_raw(w2_raw)
+mean_vals = radar_vals_raw(mean_raw)
 
 latent_dim = len(w1)
 labels = [f"$z_{i}$" for i in range(latent_dim)]
@@ -931,9 +969,25 @@ labels = [f"$z_{i}$" for i in range(latent_dim)]
 angles = np.linspace(0, 2*np.pi, latent_dim, endpoint=False).tolist()
 angles += angles[:1]
 
-# Sigma-based radial scale
-sigma_max = int(np.ceil(max(np.max(np.abs(w1_sigma)), np.max(np.abs(w2_sigma)))))
-r_ticks = np.arange(-sigma_max, sigma_max + 1, 1)
+# Radial scale
+all_vals = np.array(airfoil1_vals[:-1] + airfoil2_vals[:-1] + mean_vals[:-1], dtype=float)
+r_min = all_vals.min()
+r_max = all_vals.max()
+r_max = r_min + 1.0 if np.isclose(r_max, r_min) else r_max
+
+pad = 0.10 * (r_max - r_min + 1e-9)
+r_min -= pad
+r_max += pad
+shift = -r_min if r_min < 0 else 0.0 # polar radius must be >= 0
+
+airfoil1_plot = (np.array(airfoil1_vals) + shift).tolist()
+airfoil2_plot = (np.array(airfoil2_vals) + shift).tolist()
+mean_plot = (np.array(mean_vals) + shift).tolist()
+
+# Ticks for the latent variables
+n_ticks = 7
+r_ticks = np.linspace(r_min, r_max, n_ticks)
+r_ticks_pos = r_ticks + shift
 
 # Generated airfoil 1
 fig = plt.figure(figsize=(11, 4))
@@ -945,23 +999,23 @@ ax1.set_ylabel("y / c")
 ax1.axis("equal")
 ax1.grid(True)
 
-# Radar plot (σ-units) 1
+# Radar plot 1
 ax2 = fig.add_axes([0.5, 0.12, 0.35, 0.76], polar=True)
-ax2.yaxis.grid(True, color='black', linewidth=0.9)   
-ax2.xaxis.grid(True)                                  
-ax2.spines['polar'].set_color('black')                
+ax2.yaxis.grid(True, color='black', linewidth=0.9)
+ax2.xaxis.grid(True)
+ax2.spines['polar'].set_color('black')
 ax2.spines['polar'].set_linewidth(1.1)
-ax2.plot(angles, mean_vals, 'k--', lw=1.8, label="Mean (0σ)")
-ax2.fill(angles, mean_vals, color='black', alpha=0.15)
-ax2.plot(angles, airfoil1_vals, color='red', lw=1.8, label="Airfoil #1")
-ax2.fill(angles, airfoil1_vals, color='red', alpha=0.35)
+ax2.plot(angles, mean_plot, 'k--', lw=1.8, label="Mean")
+ax2.fill(angles, mean_plot, color='black', alpha=0.15)
+ax2.plot(angles, airfoil1_plot, color='red', lw=1.8, label="Airfoil #1")
+ax2.fill(angles, airfoil1_plot, color='red', alpha=0.35)
 ax2.set_xticks(angles[:-1])
 ax2.set_xticklabels(labels, fontsize=10)
-ax2.set_yticks(r_ticks)
-ax2.set_yticklabels([f"{t}σ" for t in r_ticks], fontsize=9)
-ax2.set_ylim(-sigma_max, sigma_max)
+ax2.set_yticks(r_ticks_pos)
+ax2.set_yticklabels([f"{t:.2f}" for t in r_ticks], fontsize=9)
+ax2.set_ylim(0, r_max + shift)
 ax2.set_rlabel_position(90)
-ax2.set_title("Generated Airfoil #1 — Latent Deviation (σ-units)", y=1.12)
+ax2.set_title("Generated Airfoil #1 — Latent Values vs Mean", y=1.12)
 ax2.legend(loc='upper right', bbox_to_anchor=(1.32, 1.1))
 plt.show()
 
@@ -975,23 +1029,23 @@ ax1.set_ylabel("y / c")
 ax1.axis("equal")
 ax1.grid(True)
 
-# Radar plot (σ-units) 2
+# Radar plot 2
 ax2 = fig.add_axes([0.5, 0.12, 0.35, 0.76], polar=True)
 ax2.yaxis.grid(True, color='black', linewidth=0.9)
 ax2.xaxis.grid(True)
 ax2.spines['polar'].set_color('black')
 ax2.spines['polar'].set_linewidth(1.1)
-ax2.plot(angles, mean_vals, 'k--', lw=1.8, label="Mean (0σ)")
-ax2.fill(angles, mean_vals, color='black', alpha=0.15)
-ax2.plot(angles, airfoil2_vals, color='red', lw=1.8, label="Airfoil #2")
-ax2.fill(angles, airfoil2_vals, color='red', alpha=0.35)
+ax2.plot(angles, mean_plot, 'k--', lw=1.8, label="Mean")
+ax2.fill(angles, mean_plot, color='black', alpha=0.15)
+ax2.plot(angles, airfoil2_plot, color='red', lw=1.8, label="Airfoil #2")
+ax2.fill(angles, airfoil2_plot, color='red', alpha=0.35)
 ax2.set_xticks(angles[:-1])
 ax2.set_xticklabels(labels, fontsize=10)
-ax2.set_yticks(r_ticks)
-ax2.set_yticklabels([f"{t}σ" for t in r_ticks], fontsize=9)
-ax2.set_ylim(-sigma_max, sigma_max)
+ax2.set_yticks(r_ticks_pos)
+ax2.set_yticklabels([f"{t:.2f}" for t in r_ticks], fontsize=9)
+ax2.set_ylim(0, r_max + shift)
 ax2.set_rlabel_position(90)
-ax2.set_title("Generated Airfoil #2 — Latent Deviation (σ-units)", y=1.12)
+ax2.set_title("Generated Airfoil #2 — Latent Values vs Mean", y=1.12)
 ax2.legend(loc='upper right', bbox_to_anchor=(1.32, 1.1))
 plt.show()
 
@@ -1017,10 +1071,23 @@ def run_full_pipeline_silent(airfoil_xy, name="Airfoil", n_ctrl=11):
     bs_composite, ctrl_all, knots = composite_bspline(cu, cl)
     
     return bs_composite, ctrl_all, knots, bs_upper, bs_lower
- 
+
 # Compute mean and standard deviation for each latent dimension across the entire dataset
-z_mean = np.mean(Z, axis=0)
-z_std = np.std(Z, axis=0)
+enc.eval()
+dec.eval()
+
+Z_mu = []
+
+with torch.no_grad():
+    
+    for (x_batch,) in train_loader:
+        
+        mu, logvar = enc(x_batch.float())
+        Z_mu.append(mu.numpy())
+
+Z_mu = np.concatenate(Z_mu, axis=0)
+z_mean = Z_mu.mean(axis=0)
+z_std = Z_mu.std(axis=0, ddof=0)
 
 # Plot
 fig, axes = plt.subplots(2, 4, figsize=(14, 7)) # 8 subplots
@@ -1042,30 +1109,37 @@ for i in range(latent_dim):
     # Decode both airfoils
     with torch.no_grad():
         
-        # the decoder generates the output vectors y_minus and y_plus, which represent two airfoils corresponding to z_i = μ_i - 2σ_i and z_i = μ_i + 2σ_i
-        y_minus = dec(torch.tensor(z_minus, dtype=torch.float32).unsqueeze(0)).squeeze().numpy()
-        y_plus  = dec(torch.tensor(z_plus,  dtype=torch.float32).unsqueeze(0)).squeeze().numpy()
+        y_minus_scaled = dec(torch.tensor(z_minus, dtype=torch.float32).unsqueeze(0)).squeeze().numpy()
+        y_plus_scaled = dec(torch.tensor(z_plus,  dtype=torch.float32).unsqueeze(0)).squeeze().numpy()
 
-    # Reconstruct and smooth the airfoil geometry
-    airfoil_minus = np.column_stack((x_norm, y_minus)) # coordinates of the first generated airfoil
-    airfoil_plus = np.column_stack((x_norm, y_plus)) # coordinates of the second generated airfoil
+    y_minus = inverse_scale(y_minus_scaled, col_min, col_max)
+    y_plus = inverse_scale(y_plus_scaled,  col_min, col_max)
+    
+    airfoil_minus = np.column_stack((x_norm, y_minus))
+    airfoil_plus = np.column_stack((x_norm, y_plus))
 
     bspline_minus, *_ = run_full_pipeline_silent(airfoil_minus)
-    bspline_plus,  *_ = run_full_pipeline_silent(airfoil_plus)
+    bspline_plus, *_ = run_full_pipeline_silent(airfoil_plus)
 
     t = np.linspace(0, 1, 1000)
     smooth_minus = bspline_minus(t)
-    smooth_plus  = bspline_plus(t)
+    smooth_plus = bspline_plus(t)
 
     # Plot both variations
     ax.plot(smooth_minus[:, 0], smooth_minus[:, 1], color='deepskyblue', lw=1.6, label=f"z{i} = μ - 2σ")
     ax.plot(smooth_plus[:, 0],  smooth_plus[:, 1],  color='red', lw=1.6, label=f"z{i} = μ + 2σ")
     ax.axhline(0, color='gray', lw=0.5)
     ax.set_title(f"Latent variable z{i}", fontsize=11)
-    axes[i].set_xlabel("x/c", fontsize=11)
-    axes[i].set_ylabel("t/c", fontsize=11)
-    ax.set_xlim(-0.05, 1.2)
-    ax.set_ylim(-0.05, 1.2)
+    ax.set_xlabel("x/c", fontsize=11)
+    ax.set_ylabel("t/c", fontsize=11)
+    xmin = min(smooth_minus[:,0].min(), smooth_plus[:,0].min())
+    xmax = max(smooth_minus[:,0].max(), smooth_plus[:,0].max())
+    ymin = min(smooth_minus[:,1].min(), smooth_plus[:,1].min())
+    ymax = max(smooth_minus[:,1].max(), smooth_plus[:,1].max())
+    px = 0.05 * (xmax - xmin + 1e-9)
+    py = 0.10 * (ymax - ymin + 1e-9)
+    ax.set_xlim(xmin - px, xmax + px)
+    ax.set_ylim(ymin - py, ymax + py)
     ax.set_aspect('equal', adjustable='box')
     ax.grid(True)
     ax.legend(fontsize=9, loc='upper right')
@@ -1078,7 +1152,9 @@ plt.show()
 from scipy import stats
 
 # Standardization of Z: used to compare each z_i with a standard normal distribution N (0, 1)
-Z_standardized = (Z - Z.mean(axis=0)) / Z.std(axis=0)
+eps = 1e-12
+Z_std = Z.std(axis=0, ddof=0)
+Z_standardized = (Z - Z.mean(axis=0)) / (Z_std + eps)
 
 # Plots
 fig, axes = plt.subplots(2, 4, figsize=(12, 6)) # 8 subplots
@@ -1135,8 +1211,9 @@ def generate_latent_random_data(dec, z_mean, z_std, n_samples=500, n_jobs=-1):
         # Pass all the Z vectors to the decoder in a single call (more efficient)
         y_dec = dec(torch.tensor(Z_sampled, dtype=torch.float32)).numpy() # 500 x 199
 
-    def process_airfoil(y_vec):
+    def process_airfoil(y_vec_scaled):
         
+      y_vec = inverse_scale(y_vec_scaled, col_min, col_max)
       airfoil = np.column_stack((x_ref, y_vec))
       features = compute_airfoil_features(airfoil)
 
@@ -1145,7 +1222,7 @@ def generate_latent_random_data(dec, z_mean, z_std, n_samples=500, n_jobs=-1):
       print(f"kzu={features[4]:.5f}, kzl={features[5]:.5f}, xtmax={features[6]:.5f}, xcmax={features[7]:.5f}")
       print(f"xzu={features[8]:.5f}, xzl={features[9]:.5f}, RLE={features[10]:.6f}")
       print(f"θLE={np.degrees(features[11]):.3f}°, θTE={np.degrees(features[12]):.3f}°, γTE={np.degrees(features[13]):.3f}°")
-      print("-----------------------------")
+      print("---------------------------")
         
       return features
       
@@ -1178,8 +1255,9 @@ def generate_latent_traversal_data(dec, z_mean, z_std, latent_dim, n_points=20, 
         
         y_dec = dec(torch.tensor(Z_trav, dtype=torch.float32)).numpy() # (8 x 20, 199)
 
-    def process_airfoil(y_vec):
+    def process_airfoil(y_vec_scaled):
         
+        y_vec = inverse_scale(y_vec_scaled, col_min, col_max)
         airfoil = np.column_stack((x_ref, y_vec))
         features = compute_airfoil_features(airfoil)
 
@@ -1188,7 +1266,7 @@ def generate_latent_traversal_data(dec, z_mean, z_std, latent_dim, n_points=20, 
         print(f"kzu={features[4]:.5f}, kzl={features[5]:.5f}, xtmax={features[6]:.5f}, xcmax={features[7]:.5f}")
         print(f"xzu={features[8]:.5f}, xzl={features[9]:.5f}, RLE={features[10]:.6f}")
         print(f"θLE={np.degrees(features[11]):.3f}°, θTE={np.degrees(features[12]):.3f}°, γTE={np.degrees(features[13]):.3f}°")
-        print("-----------------------------")
+        print("---------------------------")
           
         return features
 
@@ -1516,7 +1594,7 @@ df = pd.read_csv(path_aero, sep=",", comment=None)
 print(df.shape)
 print(df.head())
 print(df.columns)
-
+df_describe = df.describe()
 # CASE -> ID simulation
 # DOF -> Design variables (degrees of freedom of the geometry) -> 15
 # FUN -> Derived variables -> 22
@@ -1631,7 +1709,7 @@ keep_dof = np.std(DOF, axis=0) > tol
 DOF_final = DOF[:, keep_dof] 
 dof_cols_f = [c for c, k in zip(dof_cols, keep_dof) if k]
 
-print(f"Selected DOF: {len(dof_cols_f)} -> {dof_cols_f}")
+print(f"Selected DOFs: {len(dof_cols_f)} -> {dof_cols_f}")
 
 # Compute correlations
 n_dof = DOF_final.shape[1]
@@ -1671,7 +1749,7 @@ keep_of = np.std(OF, axis=0) > tol
 OF_final = OF[:, keep_of] 
 of_cols_f = [c for c, k in zip(of_cols, keep_of) if k]
 
-print(f"Selected OF: {len(of_cols_f)} -> {of_cols_f}")
+print(f"Selected OFs: {len(of_cols_f)} -> {of_cols_f}")
 
 # Compute correlations
 n_of = OF_final.shape[1]
@@ -1693,3 +1771,301 @@ plot_pearson_correlation_matrix(pearson_of, "Pearson Correlation (OF - Latent Va
 plot_spearman_correlation_matrix(spearman_of, "Spearman Correlation (OF - Latent Variables)", of_cols_f, latent_labels)
 plot_kendall_correlation_matrix(kendall_of, "Kendall-Tau Correlation (OF - Latent Variables)", of_cols_f, latent_labels)
 plot_mutual_information_matrix(mi_of, "Mutual Information (OF - Latent Variables)", of_cols_f, latent_labels)
+
+# PCA model with k = 8
+
+# Utils: scaling, airfoil, metrics
+def inverse_scale_vec(y_scaled, col_min, col_max):
+    return y_scaled * (col_max - col_min) + col_min
+
+def airfoil_from_y(y_vec, x_ref):
+    return np.column_stack((x_ref, y_vec))
+
+def rel_mse(a, b, eps=1e-8):
+    a_shift = a + 1.0 + eps
+    b_shift = b + 1.0
+    return np.mean(((a_shift - b_shift) / a_shift) ** 2)
+
+def plot_airfoil(ax, x_ref, y, title=None):
+    ax.plot(x_ref, y, lw=2)
+    ax.set_aspect("equal", adjustable="box")
+    ax.grid(True, alpha=0.25)
+    if title:
+        ax.set_title(title, fontsize=10)
+
+# PCA: fit, encode, decode, reconstruct
+
+def pca_fit(X_train):
+    mu = X_train.mean(axis=0, keepdims=True)
+    Xc = X_train - mu
+    _, S, Vt = np.linalg.svd(Xc, full_matrices=False)
+    return mu, Vt, S
+
+def pca_encode(X, mu, Vt, k):
+    Xc = X - mu
+    Vk = Vt[:k, :] # (k,D)
+    Z = Xc @ Vk.T # (N,k)
+    return Z
+
+def pca_decode(Z, mu, Vt, k):
+    Z = np.atleast_2d(Z) # (N,k)
+    Vk = Vt[:k, :] # (k,D)
+    return Z @ Vk + mu # (N,D)
+
+def pca_reconstruct(X, mu, Vt, k):
+    Z = pca_encode(X, mu, Vt, k)
+    X_hat = pca_decode(Z, mu, Vt, k)
+    return X_hat, Z
+
+def evaluate_split_relmse(X_all, idx, mu, Vt, k):
+    X = X_all[idx]
+    X_hat, _ = pca_reconstruct(X, mu, Vt, k)
+    losses = np.array([rel_mse(X[i], X_hat[i]) for i in range(X.shape[0])])
+    return float(losses.mean()), float(losses.std())
+
+# PCA generation in latent
+def pca_lambdas(S, n_train):
+    return (S**2) / (n_train - 1)
+
+def sample_pca_gaussian(S, n_train, k, n_samples=50, scale=1.0, seed=0):
+    rng = np.random.default_rng(seed)
+    lam = pca_lambdas(S, n_train)[:k]
+    Z = rng.normal(0.0, np.sqrt(lam) * scale, size=(n_samples, k))
+    return Z, lam
+
+# Validity check + batch evaluation
+def is_valid_airfoil(airfoil, min_thickness=1e-4, max_gamma_deg=30.0):
+    feat = compute_airfoil_features(airfoil)
+    tmax = feat[0]
+    gamma_te_deg = np.degrees(feat[13])
+
+    if np.isnan(tmax) or tmax < min_thickness:
+        return False, feat
+    if np.isnan(gamma_te_deg) or gamma_te_deg > max_gamma_deg:
+        return False, feat
+    return True, feat
+
+def generate_and_evaluate(model_name, Y_scaled_samples, x_ref, col_min, col_max, min_thickness=1e-4, max_gamma_deg=30.0):
+    airfoils, feats, valid = [], [], []
+    for y_scaled in Y_scaled_samples:
+        y = inverse_scale_vec(y_scaled, col_min, col_max)
+        af = airfoil_from_y(y, x_ref)
+        ok, f = is_valid_airfoil(af, min_thickness=min_thickness, max_gamma_deg=max_gamma_deg)
+        airfoils.append(af); feats.append(f); valid.append(ok)
+
+    feats = np.vstack(feats)
+    valid = np.array(valid, dtype=bool)
+    return airfoils, feats, valid
+
+def plot_airfoil_grid(airfoils, title, n_show=12, n_cols=4):
+    n_show = min(n_show, len(airfoils))
+    rows = int(np.ceil(n_show / n_cols))
+    fig, axes = plt.subplots(rows, n_cols, figsize=(3.6*n_cols, 3.0*rows))
+    axes = np.array(axes).reshape(-1)
+
+    for i, ax in enumerate(axes):
+        if i >= n_show:
+            ax.axis("off"); continue
+        af = airfoils[i]
+        ax.plot(af[:,0], af[:,1], lw=1.6)
+        ax.set_aspect("equal", adjustable="box")
+        ax.grid(True, alpha=0.25)
+
+    fig.suptitle(title, fontsize=14, y=0.98)
+    plt.tight_layout()
+    plt.show()
+
+# VAE sampling helpers 
+def sample_vae_prior(z_dim, n_samples=50, scale=1.0, seed=0, device="cpu"):
+    g = torch.Generator(device=device).manual_seed(seed)
+    return torch.randn((n_samples, z_dim), generator=g, device=device) * scale
+
+def estimate_mu_sigma_from_train(enc, train_loader):
+    enc.eval()
+    Zmu = []
+    with torch.no_grad():
+        for (x_batch,) in train_loader:
+            mu, _ = enc(x_batch.float())
+            Zmu.append(mu.cpu().numpy())
+    Zmu = np.vstack(Zmu)
+    return Zmu.mean(axis=0), Zmu.std(axis=0, ddof=0)
+
+# Correlation block (PCA latent vs DOF/OF)
+def correlation_suite(X, Z, random_state=20):
+    p = X.shape[1]
+    k = Z.shape[1]
+    out = {
+        "pearson": np.zeros((p, k)),
+        "spearman": np.zeros((p, k)),
+        "kendall": np.zeros((p, k)),
+        "mi": np.zeros((p, k)),
+    }
+    for i in range(p):
+        xi = X[:, i]
+        for j in range(k):
+            zj = Z[:, j]
+            out["pearson"][i, j] = stats.pearsonr(xi, zj)[0]
+            out["spearman"][i, j] = stats.spearmanr(xi, zj)[0]
+            out["kendall"][i, j] = stats.kendalltau(xi, zj)[0]
+            out["mi"][i, j] = mutual_info_regression(X[:, [i]], zj, random_state=random_state)[0]
+    return out
+
+# Traversals: PCA vs VAE
+def pca_traversal(mu, Vt, S, n_train, k_show=4, n_sigma=2.0):
+    lam = pca_lambdas(S, n_train)
+    sig = np.sqrt(lam) # (D,)
+    out = []
+    for j in range(k_show):
+        z_minus = np.zeros((k_show,))
+        z_plus  = np.zeros((k_show,))
+        z_minus[j] = -n_sigma * sig[j]
+        z_plus[j]  =  n_sigma * sig[j]
+        y_minus = pca_decode(z_minus, mu, Vt, k_show).squeeze()
+        y_plus  = pca_decode(z_plus,  mu, Vt, k_show).squeeze()
+        out.append((j, y_minus, y_plus))
+    return out
+
+def vae_traversal(dec, z_mean, z_std, k_show=4, n_sigma=2.0):
+    dec.eval()
+    out = []
+    for i in range(k_show):
+        zm = z_mean.copy(); zp = z_mean.copy()
+        zm[i] -= n_sigma * z_std[i]
+        zp[i] += n_sigma * z_std[i]
+        with torch.no_grad():
+            y_minus = dec(torch.tensor(zm, dtype=torch.float32).unsqueeze(0)).squeeze().cpu().numpy()
+            y_plus  = dec(torch.tensor(zp, dtype=torch.float32).unsqueeze(0)).squeeze().cpu().numpy()
+        out.append((i, y_minus, y_plus))
+    return out
+
+# Pipeline
+
+# Fit PCA (train)
+X_all = Yscaled.astype(np.float64) # y-coordinates column-wise scaled
+X_train = X_all[train_idx]
+mu_pca, Vt, S = pca_fit(X_train) # train mean (1 x 199), Vt contains the PCs, S contains the singular values
+n_train = len(train_idx)
+
+# PCA baseline evaluation vs k 
+ks = [2, 4, 8, 16, 32, 64]
+for k in ks:
+    tr_m, tr_s = evaluate_split_relmse(X_all, train_idx, mu_pca, Vt, k)
+    va_m, va_s = evaluate_split_relmse(X_all, val_idx, mu_pca, Vt, k)
+    te_m, te_s = evaluate_split_relmse(X_all, test_idx, mu_pca, Vt, k)
+    print(f"k={k:>3d} | train {tr_m:.3e}±{tr_s:.1e} | val {va_m:.3e}±{va_s:.1e} | test {te_m:.3e}±{te_s:.1e}")
+
+# Plot first reconstructed airfoil
+folder = list(data.keys())[0]
+file = list(data[folder].keys())[0]
+x_norm = data[folder][file]["x_norm"]
+y_scaled = data[folder][file]["y_scaled"]
+y_min = data[folder][file]["y_min"]
+y_max = data[folder][file]["y_max"]
+
+# Reconstruction: PCA vs VAE
+k = 8
+y_recon_scaled = pca_reconstruct(y_scaled[None, :], mu_pca, Vt, k)[0].squeeze()
+y_recon = inverse_scale(y_recon_scaled, y_min, y_max)
+y_orig = inverse_scale(y_scaled, y_min, y_max)
+
+plt.figure(figsize=(6,3))
+plt.scatter(x_norm, y_orig, s=2, alpha=0.65, label="Original")
+plt.scatter(x_norm, y_recon, s=8, alpha=0.65, label=f"PCA recon (k={k})")
+plt.title(f"PCA recon vs Original: {folder}/{file}")
+plt.axis("equal")
+plt.grid(True, alpha=0.3)
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+# Generation: PCA vs VAE
+n_gen = 100 # 100 samples
+x_ref = x_norm
+
+# PCA decoding
+Zp, _ = sample_pca_gaussian(S, n_train=n_train, k=k, n_samples=n_gen, scale=1.0, seed=1)
+Yp_scaled = pca_decode(Zp, mu_pca, Vt, k).astype(np.float64)
+
+air_pca, feat_pca, ok_pca = generate_and_evaluate("PCA (Gaussian)", Yp_scaled, x_ref, col_min, col_max)
+
+# VAE decoding
+Zv = sample_vae_prior(z_dim=8, n_samples=n_gen, scale=1.0, seed=1, device="cpu")
+dec.eval()
+with torch.no_grad():
+    Yv_scaled = dec(Zv.float()).cpu().numpy()
+
+air_vae, feat_vae, ok_vae = generate_and_evaluate("VAE (prior)", Yv_scaled, x_ref, col_min, col_max)
+
+# Plots
+plot_airfoil_grid([air_pca[i] for i in range(len(air_pca)) if ok_pca[i]], "PCA generated airfoils", n_show=12)
+plot_airfoil_grid([air_vae[i] for i in range(len(air_vae)) if ok_vae[i]], "VAE generated airfoils", n_show=12)
+
+# Traversal comparison PCA vs VAE
+z_mean, z_std = estimate_mu_sigma_from_train(enc, train_loader)
+n_sigma = 2.0
+
+pca_prof = pca_traversal(mu_pca, Vt, S, n_train=n_train, k_show=k, n_sigma=n_sigma)
+vae_prof = vae_traversal(dec, z_mean, z_std, k_show=k, n_sigma=n_sigma)
+
+fig, axes = plt.subplots(4, 4, figsize=(16, 12))
+fig.suptitle(f"Traversal comparison (±{n_sigma}σ): PCA vs VAE (all 8 dims)", fontsize=15, y=0.99)
+
+def _plot_pm(ax, x_ref, y_minus, y_plus, title, show_legend=False):
+    ax.plot(x_ref, y_minus, lw=2, label=f"-{n_sigma}σ")
+    ax.plot(x_ref, y_plus,  lw=2, label=f"+{n_sigma}σ")
+    ax.set_title(title, fontsize=11)
+    ax.set_aspect("equal", adjustable="box")
+    ax.grid(True, alpha=0.25)
+    if show_legend:
+        ax.legend(fontsize=9)
+
+for j in range(4):
+    # PCA PC(1, 2, 3, 4)
+    pc_id, y_m_s, y_p_s = pca_prof[j]
+    y_m = inverse_scale_vec(y_m_s, col_min, col_max)
+    y_p = inverse_scale_vec(y_p_s, col_min, col_max)
+    _plot_pm(axes[0, j], x_ref, y_m, y_p, title=f"PCA PC{pc_id+1}", show_legend=(j==0))
+
+    # VAE z(0, 1, 2, 3)
+    z_id, y_m_s, y_p_s = vae_prof[j]
+    y_m = inverse_scale_vec(y_m_s, col_min, col_max)
+    y_p = inverse_scale_vec(y_p_s, col_min, col_max)
+    _plot_pm(axes[1, j], x_ref, y_m, y_p, title=f"VAE z{z_id}", show_legend=(j==0))
+
+for j in range(4):
+    idx = j + 4
+
+    # PCA PC(5, 6, 7, 8)
+    pc_id, y_m_s, y_p_s = pca_prof[idx]
+    y_m = inverse_scale_vec(y_m_s, col_min, col_max)
+    y_p = inverse_scale_vec(y_p_s, col_min, col_max)
+    _plot_pm(axes[2, j], x_ref, y_m, y_p, title=f"PCA PC{pc_id+1}", show_legend=(j==0))
+
+    # VAE z(4, 5, 6, 7)
+    z_id, y_m_s, y_p_s = vae_prof[idx]
+    y_m = inverse_scale_vec(y_m_s, col_min, col_max)
+    y_p = inverse_scale_vec(y_p_s, col_min, col_max)
+    _plot_pm(axes[3, j], x_ref, y_m, y_p, title=f"VAE z{z_id}", show_legend=(j==0))
+
+plt.tight_layout(rect=[0, 0, 1, 0.965])
+plt.show()
+
+# Correlations vs DOF/OF
+Z_pca = pca_encode(X_all, mu_pca, Vt, k) # (N,k)
+
+corr_dof = correlation_suite(DOF_final, Z_pca, random_state=20)
+corr_of = correlation_suite(OF_final, Z_pca, random_state=20)
+
+plot_pearson_correlation_matrix(corr_dof["pearson"], "Pearson Correlation (DOF – PCA components)", dof_cols_f, [f"PC{i+1}" for i in range(k)])
+plot_pearson_correlation_matrix(corr_of["pearson"], "Pearson Correlation (OF – PCA components)", of_cols_f, [f"PC{i+1}" for i in range(k)])
+
+
+
+
+
+
+
+
+
+
+
